@@ -4,7 +4,8 @@
   "private": true,
   "description": "Tiber in-season fantasy scoring engine (xFPG, replacement baselines, VORP, weekly/ROS utilities).",
   "exports": {
-    ".": "./src/public/index.ts"
+    ".": "./src/public/index.ts",
+    "./weekly-distribution-v2": "./src/contracts/fantasyForecastWeeklyDistributionV2.ts"
   },
   "type": "module",
   "scripts": {
