@@ -26,6 +26,28 @@ export interface TiberDataInjuryEvidenceV0Like {
   };
 }
 
+const SOURCE_KINDS = new Set<IrrisEvidence['source_kind']>([
+  'official_injury_report', 'official_transaction', 'team_statement', 'coach_statement',
+  'player_statement', 'medical_reporting', 'national_reporter', 'beat_reporter',
+  'practice_observation', 'video_observation', 'game_observation', 'workload_data',
+  'travel_data', 'weather_data', 'other',
+]);
+
+const CLAIM_TYPES = new Set<IrrisEvidence['claim_type']>([
+  'body_region', 'diagnosis_reported', 'severity_reported', 'availability',
+  'practice_participation', 'mechanism', 'functional_observation', 'diagnostic_test',
+  'treatment_device', 'workload', 'travel_recovery', 'environmental_recovery',
+  'narrative', 'other',
+]);
+
+const BODY_REGIONS = new Set<NonNullable<IrrisEvidence['body_region']>>([
+  'head', 'neck', 'shoulder', 'arm', 'elbow', 'wrist_hand', 'back', 'hip',
+  'groin_adductor', 'quadriceps', 'hamstring', 'knee', 'calf', 'achilles',
+  'ankle', 'foot_toe', 'illness', 'other', 'unknown',
+]);
+
+const SIDES = new Set<NonNullable<IrrisEvidence['side']>>(['left', 'right', 'bilateral', 'unknown']);
+
 const featureMap: Array<[string, keyof IrrisEvidenceFeatures]> = [
   ['contact', 'contact'],
   ['nonContact', 'non_contact'],
@@ -63,22 +85,50 @@ const featureMap: Array<[string, keyof IrrisEvidenceFeatures]> = [
 ];
 
 const validIso = (value: string) => Number.isFinite(Date.parse(value));
+const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 
 const requireRecord = (value: unknown): TiberDataInjuryEvidenceV0Like => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('injury-evidence-v0 record must be an object');
   const record = value as Record<string, unknown>;
   if (record.contractVersion !== 'injury-evidence-v0') throw new Error('unsupported injury evidence contract version');
-  if (typeof record.evidenceId !== 'string' || typeof record.playerId !== 'string') throw new Error('injury evidence identity fields are required');
-  if (typeof record.observedAt !== 'string' || typeof record.reportedAt !== 'string' || typeof record.knownAt !== 'string') throw new Error('injury evidence temporal fields are required');
-  if (!validIso(record.observedAt) || !validIso(record.reportedAt) || !validIso(record.knownAt)) throw new Error('injury evidence timestamps must be valid ISO timestamps');
-  if (typeof record.sourceQuality !== 'number' || record.sourceQuality < 0 || record.sourceQuality > 1) throw new Error('injury evidence sourceQuality must be within [0,1]');
+  if (!nonEmptyString(record.evidenceId) || !nonEmptyString(record.playerId)) throw new Error('injury evidence identity fields are required');
+  if (!nonEmptyString(record.claimType) || !CLAIM_TYPES.has(record.claimType as IrrisEvidence['claim_type'])) throw new Error('injury evidence claimType is invalid');
+  if (record.bodyRegion !== null && (!nonEmptyString(record.bodyRegion) || !BODY_REGIONS.has(record.bodyRegion as NonNullable<IrrisEvidence['body_region']>))) {
+    throw new Error('injury evidence bodyRegion is invalid');
+  }
+  if (record.side !== null && (!nonEmptyString(record.side) || !SIDES.has(record.side as NonNullable<IrrisEvidence['side']>))) {
+    throw new Error('injury evidence side is invalid');
+  }
+  if (!nonEmptyString(record.observedAt) || !nonEmptyString(record.reportedAt) || !nonEmptyString(record.knownAt)) {
+    throw new Error('injury evidence temporal fields are required');
+  }
+  if (!validIso(record.observedAt) || !validIso(record.reportedAt) || !validIso(record.knownAt)) {
+    throw new Error('injury evidence timestamps must be valid ISO timestamps');
+  }
+  if (typeof record.sourceQuality !== 'number' || !Number.isFinite(record.sourceQuality) || record.sourceQuality < 0 || record.sourceQuality > 1) {
+    throw new Error('injury evidence sourceQuality must be within [0,1]');
+  }
   if (!record.features || typeof record.features !== 'object' || Array.isArray(record.features)) throw new Error('injury evidence features are required');
   if (!record.source || typeof record.source !== 'object' || Array.isArray(record.source)) throw new Error('injury evidence source envelope is required');
+
   const source = record.source as Record<string, unknown>;
-  for (const key of ['sourceKind', 'sourceName', 'sourceRecordId', 'retrievedAt', 'rawPayloadRef', 'rawPayloadSha256']) {
-    if (typeof source[key] !== 'string' || source[key] === '') throw new Error(`injury evidence source.${key} is required`);
+  if (!nonEmptyString(source.sourceKind) || !SOURCE_KINDS.has(source.sourceKind as IrrisEvidence['source_kind'])) {
+    throw new Error('injury evidence source.sourceKind is invalid');
   }
-  if (!/^[a-f0-9]{64}$/.test(String(source.rawPayloadSha256))) throw new Error('injury evidence rawPayloadSha256 is invalid');
+  for (const key of ['sourceName', 'sourceRecordId', 'retrievedAt', 'rawPayloadRef', 'rawPayloadSha256']) {
+    if (!nonEmptyString(source[key])) throw new Error(`injury evidence source.${key} is required`);
+  }
+  if (!validIso(source.retrievedAt as string)) throw new Error('injury evidence source.retrievedAt must be a valid ISO timestamp');
+  if (!/^[a-f0-9]{64}$/.test(source.rawPayloadSha256 as string)) throw new Error('injury evidence rawPayloadSha256 is invalid');
+
+  const observedAt = Date.parse(record.observedAt);
+  const reportedAt = Date.parse(record.reportedAt);
+  const knownAt = Date.parse(record.knownAt);
+  const retrievedAt = Date.parse(source.retrievedAt as string);
+  if (record.claimType !== 'narrative' && reportedAt < observedAt) throw new Error('injury evidence reportedAt cannot precede observedAt');
+  if (knownAt < reportedAt) throw new Error('injury evidence knownAt cannot precede reportedAt');
+  if (knownAt > retrievedAt) throw new Error('injury evidence knownAt cannot be later than retrievedAt');
+
   return value as TiberDataInjuryEvidenceV0Like;
 };
 
@@ -96,8 +146,8 @@ export const adaptTiberDataInjuryEvidenceV0 = (value: unknown): AdaptedIrrisEvid
   const input = requireRecord(value);
   const features: IrrisEvidenceFeatures = {};
   for (const [sourceKey, targetKey] of featureMap) {
-    const value = input.features[sourceKey];
-    if (typeof value === 'boolean') features[targetKey] = value;
+    const featureValue = input.features[sourceKey];
+    if (typeof featureValue === 'boolean') features[targetKey] = featureValue;
   }
 
   return {
