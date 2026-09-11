@@ -1,6 +1,9 @@
 import { Hono } from 'hono';
 import type { IrrisRequest } from '../../contracts/irris.js';
+import { adaptTiberDataInjuryEvidenceArrayV0 } from '../../adapters/tiberData/injuryEvidenceV0Adapter.js';
 import { assessIrris } from '../../models/irris/irrisEngine.js';
+import { buildIrrisMedicalEvidenceBasis } from '../../models/irris/irrisEvidenceBasis.js';
+import { buildIrrisEpisodeTimeline } from '../../models/irris/irrisEpisodes.js';
 
 const validateRequest = (body: unknown): string[] => {
   if (!body || typeof body !== 'object') return ['request body must be an object'];
@@ -28,6 +31,18 @@ const validateRequest = (body: unknown): string[] => {
   return issues;
 };
 
+const responseFor = (request: IrrisRequest) => {
+  const assessment = assessIrris(request);
+  const eligibleIds = new Set(assessment.eligible_evidence_ids);
+  const eligibleEvidence = request.evidence.filter((item) => eligibleIds.has(item.evidence_id));
+  return {
+    ok: true as const,
+    assessment,
+    medical_evidence_basis: buildIrrisMedicalEvidenceBasis(assessment),
+    episode_timeline: buildIrrisEpisodeTimeline(eligibleEvidence),
+  };
+};
+
 export const registerIrrisRoutes = (app: Hono) => {
   app.post('/api/irris/assess', async (c) => {
     const body = await c.req.json().catch(() => null);
@@ -35,9 +50,37 @@ export const registerIrrisRoutes = (app: Hono) => {
     if (issues.length > 0) return c.json({ ok: false, error: issues[0], issues }, 400);
 
     try {
-      return c.json({ ok: true, assessment: assessIrris(body as IrrisRequest) }, 200);
+      return c.json(responseFor(body as IrrisRequest), 200);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'IRRIS assessment failed';
+      return c.json({ ok: false, error: message }, 400);
+    }
+  });
+
+  // Canonical cross-repo handoff: accepts TIBER-Data injury-evidence-v0 rows
+  // directly and preserves their raw-trace provenance in the normalized model input.
+  app.post('/api/irris/assess/tiber-data-v0', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return c.json({ ok: false, error: 'request body must be an object' }, 400);
+    }
+    const raw = body as Record<string, unknown>;
+    if (!Array.isArray(raw.evidence)) return c.json({ ok: false, error: 'evidence must be an array' }, 400);
+
+    try {
+      const normalized: IrrisRequest = {
+        as_of: String(raw.as_of ?? ''),
+        game_id: typeof raw.game_id === 'string' ? raw.game_id : undefined,
+        player: raw.player as IrrisRequest['player'],
+        official: raw.official as IrrisRequest['official'],
+        workload: raw.workload as IrrisRequest['workload'],
+        evidence: adaptTiberDataInjuryEvidenceArrayV0(raw.evidence),
+      };
+      const issues = validateRequest(normalized);
+      if (issues.length > 0) return c.json({ ok: false, error: issues[0], issues }, 400);
+      return c.json(responseFor(normalized), 200);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'TIBER-Data injury evidence adaptation failed';
       return c.json({ ok: false, error: message }, 400);
     }
   });
