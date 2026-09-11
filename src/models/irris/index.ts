@@ -9,3 +9,5 @@ export type {
   IrrisObservedScenario,
   IrrisReconciliationResult,
 } from './irrisReconciliation.js';
+export { compareIrrisAssessments } from './irrisShock.js';
+export type { IrrisAssessmentShock, IrrisShockLevel } from './irrisShock.js';
