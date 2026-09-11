@@ -77,4 +77,30 @@ describe('adaptTiberDataInjuryEvidenceV0', () => {
     broken.source.rawPayloadSha256 = 'bad';
     expect(() => adaptTiberDataInjuryEvidenceV0(broken)).toThrow('rawPayloadSha256');
   });
+
+  it('rejects unknown source and claim vocabulary at the Forecast boundary', () => {
+    const badSource = raw();
+    badSource.source.sourceKind = 'social_guess';
+    expect(() => adaptTiberDataInjuryEvidenceV0(badSource)).toThrow('source.sourceKind');
+
+    const badClaim = raw();
+    badClaim.claimType = 'diagnose_from_vibes';
+    expect(() => adaptTiberDataInjuryEvidenceV0(badClaim)).toThrow('claimType');
+  });
+
+  it('rejects invalid body-region vocabulary', () => {
+    const broken = raw();
+    broken.bodyRegion = 'left_leg_somewhere';
+    expect(() => adaptTiberDataInjuryEvidenceV0(broken)).toThrow('bodyRegion');
+  });
+
+  it('re-checks canonical temporal ordering instead of trusting upstream casts', () => {
+    const beforeReport = raw();
+    beforeReport.knownAt = '2026-09-10T19:59:00Z';
+    expect(() => adaptTiberDataInjuryEvidenceV0(beforeReport)).toThrow('knownAt cannot precede reportedAt');
+
+    const afterRetrieval = raw();
+    afterRetrieval.knownAt = '2026-09-10T20:04:00Z';
+    expect(() => adaptTiberDataInjuryEvidenceV0(afterRetrieval)).toThrow('knownAt cannot be later than retrievedAt');
+  });
 });
