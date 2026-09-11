@@ -17,5 +17,7 @@ export {
   IRRIS_MEDICAL_EVIDENCE_REGISTRY_VERSION,
 } from './irrisMedicalEvidenceRegistry.js';
 export type { IrrisEvidenceTier, IrrisMedicalEvidenceAnchor } from './irrisMedicalEvidenceRegistry.js';
+export { buildIrrisMedicalEvidenceBasis } from './irrisEvidenceBasis.js';
+export type { IrrisMedicalEvidenceBasis } from './irrisEvidenceBasis.js';
 export { buildIrrisEpisodeTimeline } from './irrisEpisodes.js';
 export type { IrrisEpisodeTimeline, IrrisInjuryEpisode } from './irrisEpisodes.js';
