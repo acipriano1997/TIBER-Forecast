@@ -14,28 +14,15 @@ import type {
   IrrisSeverity,
 } from '../../contracts/irris.js';
 
-export const IRRIS_MODEL_VERSION = 'irris-v0.1.0';
+export const IRRIS_MODEL_VERSION = 'irris-v0.2.0';
 
 const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
 const round = (value: number) => Number(value.toFixed(4));
 
-const SOURCE_MULTIPLIER: Record<IrrisEvidence['source_kind'], number> = {
-  official_injury_report: 1,
-  official_transaction: 1,
-  team_statement: 0.75,
-  coach_statement: 0.68,
-  player_statement: 0.58,
-  medical_reporting: 0.95,
-  national_reporter: 0.88,
-  beat_reporter: 0.82,
-  practice_observation: 0.86,
-  video_observation: 0.78,
-  game_observation: 0.82,
-  workload_data: 0.9,
-  travel_data: 0.9,
-  weather_data: 0.9,
-  other: 0.5,
-};
+// V0 deliberately does not encode fixed team/reporter-class reliability weights.
+// Source reliability must be learned from temporally valid historical calibration.
+// The governed per-record source_quality field is the only source weight used here.
+const evidenceWeight = (evidence: IrrisEvidence) => clamp(evidence.source_quality);
 
 const REGION_PRIORS: Record<IrrisBodyRegion, Partial<Record<IrrisInjuryFamily, number>>> = {
   head: { concussion: 0.82, other_or_unknown: 0.18 },
@@ -183,7 +170,40 @@ const normalizeRecord = <K extends string>(record: Record<K, number>): Record<K,
   return Object.fromEntries(Object.entries(record).map(([key, value]) => [key, Number(value) / total])) as Record<K, number>;
 };
 
-const evidenceWeight = (evidence: IrrisEvidence) => clamp(evidence.source_quality) * SOURCE_MULTIPLIER[evidence.source_kind];
+type PracticeStatus = 'dnp' | 'limited' | 'full';
+type PracticeTrajectory = 'improving' | 'worsening' | 'flat' | 'mixed' | 'insufficient';
+
+const practiceStatusFromFeatures = (features: IrrisEvidenceFeatures | undefined): PracticeStatus | null => {
+  if (!features) return null;
+  if (features.practice_full === true) return 'full';
+  if (features.practice_limited === true) return 'limited';
+  if (features.practice_dnp === true) return 'dnp';
+  return null;
+};
+
+const practiceProgression = (evidence: IrrisEvidence[]) => {
+  const events = evidence
+    .map((item) => ({ item, status: practiceStatusFromFeatures(item.features) }))
+    .filter((row): row is { item: IrrisEvidence; status: PracticeStatus } => row.status !== null)
+    .sort((a, b) => {
+      const observedDelta = Date.parse(a.item.observed_at) - Date.parse(b.item.observed_at);
+      return observedDelta !== 0 ? observedDelta : Date.parse(a.item.known_at) - Date.parse(b.item.known_at);
+    });
+
+  if (events.length === 0) return { latest: null as PracticeStatus | null, trajectory: 'insufficient' as PracticeTrajectory };
+  if (events.length === 1) return { latest: events[0].status, trajectory: 'insufficient' as PracticeTrajectory };
+
+  const rank: Record<PracticeStatus, number> = { dnp: 0, limited: 1, full: 2 };
+  const deltas = events.slice(1).map((event, index) => rank[event.status] - rank[events[index].status]);
+  const positive = deltas.filter((value) => value > 0).length;
+  const negative = deltas.filter((value) => value < 0).length;
+  let trajectory: PracticeTrajectory = 'flat';
+  if (positive > 0 && negative > 0) trajectory = 'mixed';
+  else if (positive > 0) trajectory = 'improving';
+  else if (negative > 0) trajectory = 'worsening';
+
+  return { latest: events.at(-1)!.status, trajectory };
+};
 
 const eligibleEvidence = (request: IrrisRequest) => {
   const asOf = Date.parse(request.as_of);
@@ -194,15 +214,21 @@ const eligibleEvidence = (request: IrrisRequest) => {
 
   for (const evidence of request.evidence) {
     const knownAt = Date.parse(evidence.known_at);
-    if (!Number.isFinite(knownAt)) {
-      invalid.push(evidence);
-    } else if (knownAt <= asOf) {
-      eligible.push(evidence);
-    } else {
-      future.push(evidence);
-    }
+    if (!Number.isFinite(knownAt)) invalid.push(evidence);
+    else if (knownAt <= asOf) eligible.push(evidence);
+    else future.push(evidence);
   }
   return { eligible, future, invalid };
+};
+
+const temporallyEligibleOfficial = (request: IrrisRequest) => {
+  if (!request.official) return { official: undefined, state: 'not_provided' as const };
+  if (!request.official.known_at) return { official: request.official, state: 'timestamp_missing' as const };
+  const knownAt = Date.parse(request.official.known_at);
+  const asOf = Date.parse(request.as_of);
+  if (!Number.isFinite(knownAt)) return { official: undefined, state: 'invalid_timestamp' as const };
+  if (knownAt > asOf) return { official: undefined, state: 'excluded_future' as const };
+  return { official: request.official, state: 'eligible' as const };
 };
 
 const inferRegion = (request: IrrisRequest, evidence: IrrisEvidence[]): IrrisBodyRegion => {
@@ -228,18 +254,34 @@ const featureAdjustments = (
   const boost = (family: IrrisInjuryFamily, strength: number) => multiply(scores, family, 1 + strength * weight);
   const suppress = (family: IrrisInjuryFamily, strength: number) => multiply(scores, family, Math.max(0.08, 1 - strength * weight));
 
-  if (features.external_rotation && features.planted_foot && region === 'ankle') boost('syndesmotic_ankle_sprain', 2.8);
-  if (features.inversion && region === 'ankle') boost('lateral_ankle_sprain', 2.4);
-  if (features.imaging_negative_fracture) suppress('ankle_bone_injury', 0.85);
-  if (features.non_contact && features.immediate_stop && region === 'knee') boost('acl_injury', 2.2);
-  if (features.hyperextension && region === 'knee') {
+  if (features.external_rotation === true && features.planted_foot === true && region === 'ankle') boost('syndesmotic_ankle_sprain', 2.8);
+  if (features.inversion === true && region === 'ankle') boost('lateral_ankle_sprain', 2.4);
+  if (features.imaging_negative_fracture === true) suppress('ankle_bone_injury', 0.85);
+  if (features.non_contact === true && features.immediate_stop === true && region === 'knee') boost('acl_injury', 2.2);
+  if (features.hyperextension === true && region === 'knee') {
     boost('acl_injury', 1.2);
     boost('knee_contusion_or_sprain', 0.8);
   }
-  if (features.non_contact && features.immediate_stop && (region === 'calf' || region === 'achilles')) boost('achilles_injury', 2.5);
-  if (features.sprinting && features.immediate_stop && region === 'hamstring') boost('hamstring_strain', 1.8);
-  if (features.concussion_protocol || (region === 'head' && features.immediate_stop)) boost('concussion', 2.5);
-}
+  if (features.non_contact === true && features.immediate_stop === true && (region === 'calf' || region === 'achilles')) boost('achilles_injury', 2.5);
+  if (features.sprinting === true && features.immediate_stop === true && region === 'hamstring') boost('hamstring_strain', 1.8);
+  if (features.concussion_protocol === true || (region === 'head' && features.immediate_stop === true)) boost('concussion', 2.5);
+};
+
+const evidenceSupportsFamily = (item: IrrisEvidence, family: IrrisInjuryFamily, region: IrrisBodyRegion) => {
+  const text = `${item.reported_diagnosis ?? ''} ${item.text ?? ''}`;
+  if (DIAGNOSIS_TERMS.some(([pattern, mapped]) => mapped === family && pattern.test(text))) return true;
+  const f = item.features ?? {};
+  if (family === 'syndesmotic_ankle_sprain' && region === 'ankle' && f.planted_foot === true && f.external_rotation === true) return true;
+  if (family === 'lateral_ankle_sprain' && region === 'ankle' && f.inversion === true) return true;
+  if (family === 'acl_injury' && region === 'knee' && f.non_contact === true && f.immediate_stop === true) return true;
+  if (family === 'achilles_injury' && (region === 'calf' || region === 'achilles') && f.non_contact === true && f.immediate_stop === true) return true;
+  if (family === 'hamstring_strain' && region === 'hamstring' && f.sprinting === true && f.immediate_stop === true) return true;
+  if (family === 'concussion' && (f.concussion_protocol === true || (region === 'head' && f.immediate_stop === true))) return true;
+  return false;
+};
+
+const evidenceContradictsFamily = (item: IrrisEvidence, family: IrrisInjuryFamily) =>
+  family === 'ankle_bone_injury' && item.features?.imaging_negative_fracture === true;
 
 const inferSeverity = (family: IrrisInjuryFamily, evidence: IrrisEvidence[]) => {
   const raw: Record<IrrisSeverity, number> = { mild: 0.45, moderate: 0.4, severe: 0.15 };
@@ -248,16 +290,24 @@ const inferSeverity = (family: IrrisInjuryFamily, evidence: IrrisEvidence[]) => 
   for (const item of evidence) {
     const w = evidenceWeight(item);
     const f = item.features ?? {};
-    if (f.returned_to_game) adjust('mild', 0.75 * w);
-    if (f.practice_full) adjust('mild', 0.65 * w);
-    if (f.practice_limited) adjust('moderate', 0.45 * w);
-    if (f.practice_dnp) adjust('moderate', 0.55 * w);
-    if (f.immediate_stop && !f.returned_to_game) adjust('moderate', 0.45 * w);
-    if (f.visible_limp) adjust('moderate', 0.3 * w);
-    if (f.unable_to_bear_weight) adjust('severe', 0.8 * w);
-    if (f.carted) adjust('severe', 0.55 * w);
-    if (f.structural_damage_reported) adjust('severe', 1.05 * w);
-    if (f.surgery_reported) adjust('severe', 1.5 * w);
+    if (f.returned_to_game === true) adjust('mild', 0.75 * w);
+    // Important tri-state rule: unknown return status is not evidence of non-return.
+    if (f.immediate_stop === true && f.returned_to_game === false) adjust('moderate', 0.45 * w);
+    if (f.visible_limp === true) adjust('moderate', 0.3 * w);
+    if (f.unable_to_bear_weight === true) adjust('severe', 0.8 * w);
+    if (f.carted === true) adjust('severe', 0.55 * w);
+    if (f.structural_damage_reported === true) adjust('severe', 1.05 * w);
+    if (f.surgery_reported === true) adjust('severe', 1.5 * w);
+  }
+
+  const practice = practiceProgression(evidence);
+  if (practice.latest === 'full') adjust('mild', 0.75);
+  if (practice.latest === 'limited') adjust('moderate', 0.35);
+  if (practice.latest === 'dnp') adjust('moderate', 0.5);
+  if (practice.trajectory === 'improving') adjust('mild', 0.35);
+  if (practice.trajectory === 'worsening') {
+    adjust('moderate', 0.35);
+    adjust('severe', 0.15);
   }
 
   if (family === 'acl_injury' || family === 'achilles_injury') raw.severe += 1.1;
@@ -282,18 +332,12 @@ const inferDifferential = (request: IrrisRequest, evidence: IrrisEvidence[]): Ir
   return Object.entries(normalized)
     .map(([family, probability]) => {
       const injuryFamily = family as IrrisInjuryFamily;
-      const supporting = evidence
-        .filter((item) => {
-          const text = `${item.reported_diagnosis ?? ''} ${item.text ?? ''}`;
-          return DIAGNOSIS_TERMS.some(([pattern, mapped]) => mapped === injuryFamily && pattern.test(text));
-        })
-        .map((item) => item.evidence_id);
       return {
         injury_family: injuryFamily,
         probability: round(probability),
-        severity: Object.fromEntries(Object.entries(inferSeverity(injuryFamily, evidence)).map(([k, v]) => [k, round(v)])) as Record<IrrisSeverity, number>,
-        supporting_evidence_ids: supporting,
-        contradicting_evidence_ids: [],
+        severity: Object.fromEntries(Object.entries(inferSeverity(injuryFamily, evidence)).map(([key, value]) => [key, round(value)])) as Record<IrrisSeverity, number>,
+        supporting_evidence_ids: evidence.filter((item) => evidenceSupportsFamily(item, injuryFamily, region)).map((item) => item.evidence_id),
+        contradicting_evidence_ids: evidence.filter((item) => evidenceContradictsFamily(item, injuryFamily)).map((item) => item.evidence_id),
       };
     })
     .sort((a, b) => b.probability - a.probability)
@@ -324,17 +368,22 @@ const availabilityEvidenceAdjustment = (evidence: IrrisEvidence[]) => {
   let logitShift = 0;
   for (const item of evidence) {
     const w = evidenceWeight(item);
-    if (item.features?.expected_active) logitShift += 1.2 * w;
-    if (item.features?.expected_inactive) logitShift -= 1.8 * w;
-    if (item.features?.practice_full) logitShift += 0.55 * w;
-    if (item.features?.practice_dnp) logitShift -= 0.35 * w;
-    if (item.features?.returned_to_game) logitShift += 0.45 * w;
+    if (item.features?.expected_active === true) logitShift += 1.2 * w;
+    if (item.features?.expected_inactive === true) logitShift -= 1.8 * w;
+    if (item.features?.returned_to_game === true) logitShift += 0.45 * w;
   }
+
+  const practice = practiceProgression(evidence);
+  if (practice.latest === 'full') logitShift += 0.7;
+  if (practice.latest === 'limited') logitShift += 0.05;
+  if (practice.latest === 'dnp') logitShift -= 0.5;
+  if (practice.trajectory === 'improving') logitShift += 0.35;
+  if (practice.trajectory === 'worsening') logitShift -= 0.45;
   return logitShift;
 };
 
-const logistic = (x: number) => 1 / (1 + Math.exp(-x));
-const logit = (p: number) => Math.log(clamp(p, 0.01, 0.99) / (1 - clamp(p, 0.01, 0.99)));
+const logistic = (value: number) => 1 / (1 + Math.exp(-value));
+const logit = (probability: number) => Math.log(clamp(probability, 0.01, 0.99) / (1 - clamp(probability, 0.01, 0.99)));
 
 const inferRecovery = (request: IrrisRequest, differential: IrrisInjuryCandidate[], evidence: IrrisEvidence[]): IrrisRecoveryForecast => {
   const pmf = weightedRecovery(differential);
@@ -352,8 +401,8 @@ const inferRecovery = (request: IrrisRequest, differential: IrrisInjuryCandidate
   const medianIndex = cumulative.findIndex((value) => value >= 0.5);
   const medianBucket = (['0', '1', '2', '3', '4+'][medianIndex < 0 ? 4 : medianIndex]) as IrrisRecoveryForecast['median_games_missed_bucket'];
   const top = differential[0];
-  const recurrence = request.player.recent_return_from_same_region_injury || (request.player.prior_same_region_episodes ?? 0) > 0;
-  const softTissue = top && ['hamstring_strain', 'calf_strain', 'groin_adductor_strain', 'quadriceps_strain'].includes(top.injury_family);
+  const recurrence = request.player.recent_return_from_same_region_injury === true || (request.player.prior_same_region_episodes ?? 0) > 0;
+  const softTissue = top ? ['hamstring_strain', 'calf_strain', 'groin_adductor_strain', 'quadriceps_strain'].includes(top.injury_family) : false;
   const recurrenceRisk = recurrence && softTissue ? 'high' : recurrence || softTissue ? 'elevated' : top?.injury_family === 'other_or_unknown' ? 'unknown' : 'baseline';
   const lagMedian = Math.max(0, Math.round(burden * 3));
 
@@ -369,9 +418,9 @@ const inferRecovery = (request: IrrisRequest, differential: IrrisInjuryCandidate
 };
 
 const inferReadiness = (request: IrrisRequest): IrrisReadinessForecast => {
-  const w = request.workload;
+  const workload = request.workload;
   const drivers: string[] = [];
-  if (!w) return { score: 70, label: 'high_uncertainty', uncertainty: 0.75, drivers: ['workload context unavailable'] };
+  if (!workload) return { score: 70, label: 'high_uncertainty', uncertainty: 0.75, drivers: ['workload context unavailable'] };
 
   let score = 74;
   let known = 0;
@@ -381,27 +430,27 @@ const inferReadiness = (request: IrrisRequest): IrrisReadinessForecast => {
     if (condition) { score += delta; drivers.push(label); }
   };
 
-  if (w.hours_since_last_game !== undefined) {
+  if (workload.hours_since_last_game !== undefined) {
     known += 1;
-    if (w.hours_since_last_game < 110) { score -= 8; drivers.push('compressed recovery interval'); }
-    if (w.hours_since_last_game >= 180) { score += 4; drivers.push('extended recovery interval'); }
+    if (workload.hours_since_last_game < 110) { score -= 8; drivers.push('compressed recovery interval'); }
+    if (workload.hours_since_last_game >= 180) { score += 4; drivers.push('extended recovery interval'); }
   }
-  if (w.last_game_snaps !== undefined && w.recent_avg_snaps && w.recent_avg_snaps > 0) {
+  if (workload.last_game_snaps !== undefined && workload.recent_avg_snaps !== undefined && workload.recent_avg_snaps > 0) {
     known += 1;
-    const ratio = w.last_game_snaps / w.recent_avg_snaps;
+    const ratio = workload.last_game_snaps / workload.recent_avg_snaps;
     if (ratio > 1.25) { score -= 9; drivers.push('snap workload spike'); }
     else if (ratio > 1.1) { score -= 4; drivers.push('modest snap workload increase'); }
   }
-  if (w.last_game_opportunities !== undefined && w.recent_avg_opportunities && w.recent_avg_opportunities > 0) {
+  if (workload.last_game_opportunities !== undefined && workload.recent_avg_opportunities !== undefined && workload.recent_avg_opportunities > 0) {
     known += 1;
-    if (w.last_game_opportunities / w.recent_avg_opportunities > 1.3) { score -= 8; drivers.push('opportunity workload spike'); }
+    if (workload.last_game_opportunities / workload.recent_avg_opportunities > 1.3) { score -= 8; drivers.push('opportunity workload spike'); }
   }
-  use(w.overtime_last_game, -4, 'overtime exposure');
-  use(w.international_travel, -6, 'international travel');
-  use((w.travel_time_zones ?? 0) >= 3, -4, 'multi-time-zone travel');
-  use((w.heat_stress_index ?? 0) >= 0.75, -5, 'high environmental heat stress');
-  use(w.illness_reported, -12, 'reported illness');
-  use(w.bye_week_last_week, 8, 'bye-week recovery');
+  use(workload.overtime_last_game, -4, 'overtime exposure');
+  use(workload.international_travel, -6, 'international travel');
+  use(workload.travel_time_zones !== undefined ? workload.travel_time_zones >= 3 : undefined, -4, 'multi-time-zone travel');
+  use(workload.heat_stress_index !== undefined ? workload.heat_stress_index >= 0.75 : undefined, -5, 'high environmental heat stress');
+  use(workload.illness_reported, -12, 'reported illness');
+  use(workload.bye_week_last_week, 8, 'bye-week recovery');
   use(request.player.recent_return_from_same_region_injury, -7, 'recent return from injury');
 
   score = clamp(score, 0, 100);
@@ -431,8 +480,15 @@ const inferScenarios = (recovery: IrrisRecoveryForecast, differential: IrrisInju
 };
 
 const blankLimitations = (): IrrisFunctionalLimitations => ({
-  acceleration: 0, top_speed: 0, deceleration: 0, lateral_cutting: 0, power: 0,
-  throwing: 0, grip_catching: 0, contact_tolerance: 0, endurance: 0,
+  acceleration: 0,
+  top_speed: 0,
+  deceleration: 0,
+  lateral_cutting: 0,
+  power: 0,
+  throwing: 0,
+  grip_catching: 0,
+  contact_tolerance: 0,
+  endurance: 0,
 });
 
 const inferFunctionalLimitations = (request: IrrisRequest, differential: IrrisInjuryCandidate[]): IrrisFunctionalLimitations => {
@@ -443,21 +499,42 @@ const inferFunctionalLimitations = (request: IrrisRequest, differential: IrrisIn
   const set = (keys: Array<keyof IrrisFunctionalLimitations>, multiplier = 1) => keys.forEach((key) => { result[key] = round(clamp(magnitude * multiplier)); });
 
   switch (top.injury_family) {
-    case 'hamstring_strain': case 'calf_strain':
-      set(['acceleration', 'top_speed', 'deceleration', 'endurance'], 0.95); set(['lateral_cutting'], 0.7); break;
+    case 'hamstring_strain':
+    case 'calf_strain':
+      set(['acceleration', 'top_speed', 'deceleration', 'endurance'], 0.95);
+      set(['lateral_cutting'], 0.7);
+      break;
     case 'groin_adductor_strain':
-      set(['acceleration', 'deceleration', 'lateral_cutting'], 0.9); set(['top_speed'], 0.6); break;
+      set(['acceleration', 'deceleration', 'lateral_cutting'], 0.9);
+      set(['top_speed'], 0.6);
+      break;
     case 'quadriceps_strain':
-      set(['acceleration', 'deceleration', 'power'], 0.9); break;
-    case 'lateral_ankle_sprain': case 'syndesmotic_ankle_sprain': case 'foot_or_toe_injury':
-      set(['acceleration', 'deceleration', 'lateral_cutting', 'power'], 0.9); break;
-    case 'acl_injury': case 'mcl_injury': case 'meniscus_injury': case 'knee_contusion_or_sprain':
-      set(['acceleration', 'deceleration', 'lateral_cutting', 'power'], 0.95); break;
+      set(['acceleration', 'deceleration', 'power'], 0.9);
+      break;
+    case 'lateral_ankle_sprain':
+    case 'syndesmotic_ankle_sprain':
+    case 'foot_or_toe_injury':
+      set(['acceleration', 'deceleration', 'lateral_cutting', 'power'], 0.9);
+      break;
+    case 'acl_injury':
+    case 'mcl_injury':
+    case 'meniscus_injury':
+    case 'knee_contusion_or_sprain':
+      set(['acceleration', 'deceleration', 'lateral_cutting', 'power'], 0.95);
+      break;
     case 'shoulder_sprain_or_contusion':
-      set(['contact_tolerance'], 0.9); if (request.player.position === 'QB') set(['throwing'], 0.95); else set(['grip_catching'], 0.65); break;
-    case 'concussion': set(['contact_tolerance', 'endurance'], 0.55); break;
-    case 'illness': set(['endurance'], 0.9); break;
-    default: set(['endurance'], 0.25);
+      set(['contact_tolerance'], 0.9);
+      if (request.player.position === 'QB') set(['throwing'], 0.95);
+      else set(['grip_catching'], 0.65);
+      break;
+    case 'concussion':
+      set(['contact_tolerance', 'endurance'], 0.55);
+      break;
+    case 'illness':
+      set(['endurance'], 0.9);
+      break;
+    default:
+      set(['endurance'], 0.25);
   }
   return result;
 };
@@ -491,21 +568,29 @@ const confidenceScore = (evidence: IrrisEvidence[], differential: IrrisInjuryCan
 
 export const assessIrris = (request: IrrisRequest): IrrisAssessment => {
   const { eligible, future, invalid } = eligibleEvidence(request);
-  const differential = inferDifferential(request, eligible);
-  const recovery = inferRecovery(request, differential, eligible);
-  const readiness = inferReadiness(request);
+  const officialTemporal = temporallyEligibleOfficial(request);
+  const effectiveRequest: IrrisRequest = { ...request, official: officialTemporal.official };
+  const differential = inferDifferential(effectiveRequest, eligible);
+  const recovery = inferRecovery(effectiveRequest, differential, eligible);
+  const readiness = inferReadiness(effectiveRequest);
   const scenarios = inferScenarios(recovery, differential, readiness);
-  const functionalLimitations = inferFunctionalLimitations(request, differential);
-  const narrativeDivergence = inferNarrativeDivergence(request, differential, recovery);
+  const functionalLimitations = inferFunctionalLimitations(effectiveRequest, differential);
+  const narrativeDivergence = inferNarrativeDivergence(effectiveRequest, differential, recovery);
   const concussionPossible = differential.some((candidate) => candidate.injury_family === 'concussion' && candidate.probability >= 0.15);
+  const practice = practiceProgression(eligible);
   const caveats = [
     'IRRIS output is model inference and is not a medically confirmed diagnosis.',
     'Team, reporter, practice and video observations are evidence inputs rather than diagnostic ground truth.',
     'Broadcast/video mechanism evidence must not be interpreted as imaging-level anatomical confirmation.',
     'Recovery priors are broad v0 priors and require empirical calibration before production recommendation authority.',
+    'Source-class reliability multipliers are intentionally neutral until empirically calibrated.',
   ];
   if (eligible.length === 0) caveats.push('No temporally eligible injury evidence was supplied; inference is low-confidence.');
   if (invalid.length > 0) caveats.push(`${invalid.length} evidence item(s) had invalid known_at timestamps and were excluded.`);
+  if (officialTemporal.state === 'timestamp_missing') caveats.push('Official state has no known_at timestamp; temporal eligibility cannot be independently verified.');
+  if (officialTemporal.state === 'invalid_timestamp') caveats.push('Official state had an invalid known_at timestamp and was excluded.');
+  if (officialTemporal.state === 'excluded_future') caveats.push('Official state was learned after as_of and was excluded from this frozen replay.');
+  if (practice.trajectory !== 'insufficient') caveats.push(`Practice trajectory=${practice.trajectory}; latest=${practice.latest}.`);
   if (concussionPossible) caveats.push('Possible concussion: IRRIS does not predict or assert medical clearance; protocol clearance remains external ground truth.');
 
   return {
@@ -516,7 +601,7 @@ export const assessIrris = (request: IrrisRequest): IrrisAssessment => {
     as_of: request.as_of,
     eligible_evidence_ids: eligible.map((item) => item.evidence_id),
     excluded_future_evidence_ids: future.map((item) => item.evidence_id),
-    official: request.official ?? null,
+    official: officialTemporal.official ?? null,
     differential,
     recovery,
     readiness,
