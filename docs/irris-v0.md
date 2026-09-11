@@ -2,13 +2,13 @@
 
 ## Status
 
-IRRIS v0 is a deterministic, typed injury/recovery/readiness inference kernel in TIBER-Forecast.
+IRRIS is the TIBER-Forecast injury/recovery/readiness inference kernel. Current model version: `irris-v0.2.0`.
 
-It is **model inference, not observed medical truth, not medical advice, and not a substitute for team medical clearance**. It is designed to let TIBER reason independently from public team narratives while preserving the distinction between what is known, what is reported, what is observed, and what the model infers.
+It is **model inference, not observed medical truth, not medical advice, and not a substitute for team medical clearance**. The system is intentionally capable of disagreeing with public team narratives while preserving the distinction between official facts, public reporting, observed behavior, and model inference.
 
-Current model version: `irris-v0.1.0`.
+Recommendation authority remains **HOLD** until governed historical/live evidence and empirical calibration gates exist.
 
-## Cross-repository ownership
+## Repository ownership
 
 ```text
 TIBER-Data
@@ -16,115 +16,140 @@ TIBER-Data
         |
         v
 TIBER-Forecast / IRRIS
-  probabilistic injury + severity + recovery + readiness inference
+  probabilistic diagnosis + severity + recovery + readiness inference
         |
         v
 TIBER-Fantasy
-  validated consumption + user-facing explanation + decision orchestration
+  validated consumption + explanation + decision orchestration
 ```
 
-TIBER-Data owns evidence truth. TIBER-Forecast owns inference. TIBER-Fantasy must not reproduce the model or silently promote inference into fact.
+TIBER-Data owns source truth. TIBER-Forecast owns inference. TIBER-Fantasy must not duplicate the model or silently convert inference into confirmed medical fact.
 
 ## Questions IRRIS answers
 
-IRRIS separates questions that fantasy platforms usually collapse into one status icon:
+IRRIS separates questions that are normally collapsed into one fantasy injury badge:
 
-1. What injury families are most consistent with the temporally eligible public evidence?
-2. How uncertain is the inferred severity?
-3. What is the probability of being active for the next game?
-4. Conditional on being active, how likely is a normal versus limited workload?
-5. What is the probability of an early exit?
-6. How long might return-to-workload and return-to-performance lag behind return-to-play?
+1. Which injury families best fit the evidence available at the frozen `as_of` time?
+2. What is the severity distribution?
+3. How likely is the player to be active next game?
+4. If active, how likely is a normal workload?
+5. How likely is an early exit?
+6. How far might return-to-workload and return-to-performance lag behind return-to-play?
 7. Is recurrence risk elevated?
-8. Is the player's recovery/readiness state fresh, normal, loaded, depleted, or too uncertain to characterize?
-9. Does the public/team narrative materially disagree with the model-inferred state?
+8. Is the recovery/readiness state fresh, normal, loaded, depleted, or too uncertain to characterize?
+9. Does the public narrative materially disagree with model inference?
+10. Did new information create a material injury-news shock?
 
-## Evidence doctrine
+## Official status is separate from inference
 
-Official designations are authoritative **facts about the designation**, not authoritative probabilities of playing normally.
+An official designation is authoritative as a fact about the designation. It is not treated as a complete medical model.
 
-IRRIS preserves official status separately from its model inference. A player may therefore be:
+A player can therefore be officially `questionable` while IRRIS assigns either high or low active probability. A player can be active while still carrying elevated limited-workload or early-exit probability.
 
-- officially `questionable` with a high active probability;
-- officially `questionable` with a low active probability;
-- officially active but with elevated limited-workload or early-exit probability;
-- subject to reassuring public language while the model remains materially concerned.
+Confirmed `inactive`, `out`, `IR`, `PUP`, or `NFI` states override model game availability when they are temporally eligible for the assessment.
 
-Confirmed `inactive`, `out`, `IR`, `PUP`, or `NFI` states override model availability and force next-game active probability to zero for the referenced game state. Inference never rewrites the official record.
+Official status never gets overwritten by the inferred diagnosis.
 
 ## Frozen-as-of temporal rule
 
-Every assessment has an `as_of` timestamp. Evidence is eligible only when:
+Evidence is eligible only when:
 
 ```text
 known_at <= as_of
 ```
 
-Later MRI reporting, practice information, corrections, or reporter updates are excluded from earlier replays. The assessment exposes both `eligible_evidence_ids` and `excluded_future_evidence_ids` so temporal leakage is inspectable.
+Later MRI reporting, practice information, corrections, reporter updates, or official status changes are excluded from earlier replays.
 
-The preferred upstream source is TIBER-Data `injury-evidence-v0`, whose adapter preserves raw-payload reference/hash and source/retrieval timestamps.
+The same rule now applies to official state when `official.known_at` is present. Future-dated official state is excluded instead of leaking backward. A missing official timestamp is surfaced as a caveat rather than silently declared temporally certified.
+
+Assessments expose eligible evidence IDs and future-excluded evidence IDs for replay inspection.
+
+## TIBER-Data evidence bridge
+
+The preferred upstream contract is `injury-evidence-v0` from TIBER-Data.
+
+The Forecast adapter preserves:
+
+- evidence identity;
+- source identity;
+- observed/reported/known timestamps;
+- retrieval timestamp;
+- raw payload reference;
+- raw payload SHA-256;
+- body region and side;
+- tri-state mechanism/function observations;
+- public reported diagnosis;
+- per-record source quality.
+
+`null` observations remain unknown. They are not converted to `false`.
 
 ## Independent diagnostic inference
 
-IRRIS does not force one diagnosis. It emits a differential distribution across bounded injury families plus a severity distribution for every candidate.
+IRRIS emits a differential diagnosis rather than forcing a single label.
 
-Current families include:
-
-- concussion;
-- lateral and syndesmotic ankle sprain;
-- ankle bone injury;
-- Achilles injury;
-- ACL, MCL, meniscus, and nonspecific knee sprain/contusion;
-- hamstring, calf, groin/adductor, and quadriceps strain;
-- shoulder sprain/contusion;
-- foot/toe injury;
-- illness;
-- other/unknown.
+Current bounded injury families include concussion, lateral ankle sprain, syndesmotic/high-ankle sprain, ankle bone injury, Achilles injury, ACL/MCL/meniscus/nonspecific knee injury, hamstring/calf/groin/quadriceps strain, shoulder sprain/contusion, foot/toe injury, illness, and other/unknown.
 
 ### Mechanism evidence
 
-The v0 engine uses bounded mechanism likelihood adjustments. Examples:
+Examples of bounded v0 mechanism updates:
 
-- planted foot + external rotation at the ankle increases syndesmotic/high-ankle probability;
+- planted foot + external rotation at the ankle increases syndesmotic probability;
 - inversion increases lateral-ankle probability;
 - non-contact immediate stop at the knee increases ACL-family probability;
 - non-contact immediate stop in the calf/Achilles region increases Achilles-family probability;
 - sprinting + immediate stop in the hamstring region increases hamstring-strain probability;
-- documented concussion protocol increases concussion probability.
+- concussion-protocol reporting increases concussion probability.
 
-These are model features, not diagnoses. Broadcast/video evidence must not be represented as MRI-level anatomical confirmation.
+Mechanism evidence can support a candidate but is never represented as imaging-level confirmation.
 
-### Reported diagnosis evidence
+The assessment records supporting evidence IDs. Explicit negative-fracture imaging can appear as contradicting evidence for an ankle-bone candidate.
 
-Publicly reported diagnoses are weighted evidence and can substantially update the differential. They do not retroactively erase the earlier model state in an `as_of` replay.
+## Source reliability doctrine
+
+V0 does **not** encode fixed coach/team/beat/national-reporter reliability rankings.
+
+Those multipliers were removed during hardening because source reliability must be learned from temporally valid historical calibration, not anecdote. The model currently uses the governed per-record `source_quality` field only.
+
+Future source/team/reporting reliability must be trained and evaluated out of sample before promotion.
 
 ## Severity inference
 
-Severity remains probabilistic (`mild`, `moderate`, `severe`). V0 uses observations including:
+Severity is a probability distribution over `mild`, `moderate`, and `severe`.
 
-- returned to game;
-- full/limited/DNP practice progression;
-- immediate stop and non-return;
-- visible limp;
-- weight-bearing difficulty;
-- cart use;
-- public reporting of structural damage or surgery.
+Signals include explicit return to game, explicit non-return after an immediate stop, visible limp, inability to bear weight, cart use, public structural-damage reporting, surgery reporting, and ordered practice progression.
 
-Major structural injury families receive appropriately more severe priors. These are broad v0 priors and are not a substitute for calibrated injury-specific medical datasets.
+A critical tri-state rule is enforced:
+
+```text
+returned_to_game = unknown
+```
+
+is **not** treated as:
+
+```text
+returned_to_game = false
+```
+
+## Practice trajectory model
+
+Practice order matters.
+
+IRRIS sorts practice evidence chronologically and classifies trajectories such as:
+
+```text
+DNP -> Limited -> Full      = improving
+Full -> Limited -> DNP      = worsening
+Limited -> Limited          = flat
+DNP -> Full -> Limited      = mixed
+```
+
+The latest practice state and the trajectory independently influence severity and availability. Historical statuses are not simply summed in an order-blind manner.
 
 ## Recovery model
 
 IRRIS models a distribution rather than a single return date.
 
-The v0 output includes probability of missing:
-
-- 0 games;
-- 1 game;
-- 2 games;
-- 3 games;
-- 4+ games.
-
-It separately emits:
+It emits probability of missing 0, 1, 2, 3, or 4+ games, plus:
 
 - active-next-game probability;
 - full-workload-next-game probability;
@@ -133,7 +158,7 @@ It separately emits:
 - return-to-performance lag interval;
 - recurrence-risk state.
 
-This enforces the doctrine:
+Core doctrine:
 
 ```text
 return to play != return to workload != return to performance != healed
@@ -150,11 +175,11 @@ active_limited
 active_early_exit
 ```
 
-These states are designed to become inputs to downstream fantasy-point/tail-risk modeling. They are intentionally not collapsed to one projection multiplier inside IRRIS.
+These states are intended for downstream fantasy/tail-risk modeling rather than a generic injury percentage haircut.
 
 ## Functional limitation vector
 
-IRRIS translates the leading injury family/severity burden into a bounded functional vector:
+IRRIS maps the leading diagnosis/severity burden to a bounded football-function vector:
 
 - acceleration;
 - top speed;
@@ -166,144 +191,120 @@ IRRIS translates the leading injury family/severity burden into a bounded functi
 - contact tolerance;
 - endurance.
 
-Position changes the interpretation. For example, a shoulder injury can affect a QB's throwing dimension more directly than a non-QB's.
+Position matters. For example, a shoulder injury can load the QB throwing dimension differently from a non-QB catching/contact profile.
 
-The vector is a model abstraction for downstream football modeling, not a clinical range-of-motion measurement.
+This is a football-model abstraction, not a clinical range-of-motion measurement.
 
 ## FRIM — Fatigue & Recovery Intelligence Model
 
-The readiness layer deliberately does not treat “short week” as synonymous with injury or depletion.
+Readiness is not a synonym for injury and short rest is not automatically treated as harmful.
 
-V0 combines available signals such as:
+Current public-data features include:
 
-- hours since previous game;
-- snap workload relative to the player's recent baseline;
-- opportunity workload relative to baseline;
+- hours since prior game;
+- snap workload relative to recent baseline;
+- opportunity workload relative to recent baseline;
 - overtime exposure;
 - multi-time-zone/international travel;
 - environmental heat stress;
 - reported illness;
 - bye-week recovery;
-- recent return from a same-region injury.
+- recent return from same-region injury.
 
-The output is a continuous readiness score plus an interpretable label:
+The output is a readiness score plus:
 
 ```text
 fresh | normal | loaded | depleted | high_uncertainty
 ```
 
-Missing workload context increases uncertainty rather than inventing a neutral-perfect state.
+Missing workload context raises uncertainty rather than fabricating a clean bill of health.
 
 ## Tissue-aware recurrence
 
-Recent return from a same-region injury and prior same-region episodes can elevate recurrence state. Soft-tissue families receive special recurrence attention.
+Prior same-region episodes and recent return from a same-region injury can elevate recurrence state. Soft-tissue families receive special recurrence attention.
 
-V0 does not yet claim individualized tissue load from private GPS/training telemetry. Public workload is a proxy and uncertainty must remain visible.
+IRRIS does not claim access to private club GPS/training telemetry. Public workload remains a proxy.
 
 ## Narrative divergence
 
-IRRIS can compare structured team/public narrative tone (`reassuring`, `neutral`, `concerning`) against the model-inferred concern state.
+Structured public narrative tone (`reassuring`, `neutral`, `concerning`) is compared with model-inferred concern.
 
-The resulting divergence score means:
+A high divergence means the public framing and model inference disagree. It does **not** mean a team physician is proven wrong; teams may possess private examination or imaging unavailable publicly.
 
-> public narrative framing and model inference disagree
+## Injury News Shock
 
-It does **not** mean:
+`compareIrrisAssessments` compares two frozen assessments for the same player and reports:
 
-> the team physician is wrong
+- active-probability delta;
+- full-workload-probability delta;
+- early-exit-probability delta;
+- confidence delta;
+- leading injury-family change;
+- newly high narrative divergence;
+- `none`, `low`, `moderate`, or `high` shock state.
 
-Teams may possess examination/imaging information unavailable publicly. Divergence is useful because public fantasy decisions occur under public information constraints.
+This supports late-breaking alerts such as “active probability fell 27 points” or “leading diagnosis changed after new evidence.” Reverse-time comparison is rejected.
 
 ## Concussion rule
 
-IRRIS may infer that a concussion/protocol state is plausible and may forecast game availability from public evidence. It must not assert medical clearance.
+IRRIS may infer that concussion/protocol status is plausible and may estimate game availability from public evidence. It must not assert medical clearance.
 
-When concussion probability is material, output uses:
+When concussion probability is material:
 
 ```text
 medical_clearance_forecast = not_predicted
 ```
 
-No downstream consumer may convert this into “cleared” or an exact medical-resolution timetable.
+No downstream consumer may translate that into “cleared” or an exact clinical recovery timetable.
 
 ## Reconciliation and learning
 
-`irrisReconciliation.ts` evaluates forecasts after the game using proper scoring rules:
+Postgame reconciliation scores:
 
-- Brier score for active probability;
-- Brier score for full-workload probability;
-- Brier score for early-exit probability;
-- log loss for the four-state realized scenario.
+- active probability with Brier score;
+- full-workload probability with Brier score;
+- early-exit probability with Brier score;
+- four-state scenario outcome with log loss.
 
-Cohort calibration bins compare mean predicted probability with observed frequency. Calibration should be analyzed by dimensions such as:
+Calibration bins compare mean predicted probability with observed frequency. Cohort evaluation can later be segmented by injury family, position, team/reporting environment, source mix, practice trajectory, days since injury, recurrence state, readiness state, and confidence band.
 
-- injury family;
-- position;
-- team/coach/reporting environment;
-- source mix;
-- practice trajectory;
-- days since injury;
-- recurrence state;
-- readiness state;
-- confidence band.
+A single miss is not itself a calibration conclusion. Persistent cohort error is.
 
-A single miss is not automatically a model failure. Persistent calibration error is.
+## Calibration sequence before recommendation authority
 
-## Planned empirical calibration sequence
-
-Before IRRIS receives recommendation authority:
-
-1. Backfill a source-governed historical injury evidence corpus with frozen timestamps.
-2. Evaluate diagnosis-family discrimination only where a later public diagnosis/outcome is supportable.
+1. Build a governed historical injury evidence corpus with frozen timestamps.
+2. Evaluate diagnosis-family discrimination only where later public outcomes support labels.
 3. Calibrate severity and games-missed distributions by injury family.
 4. Calibrate active/full-workload/early-exit probabilities.
-5. Learn source/team/reporting reliability only from temporally valid historical outcomes.
-6. Test readiness features as challengers; retain only features with out-of-sample value.
+5. Learn source/team/reporting reliability from historical outcomes only.
+6. Treat readiness features as challengers and retain only out-of-sample signal.
 7. Measure calibration drift by season/regime.
 8. Promote only after predeclared Brier/log-loss/calibration gates pass.
 
-No source/team reliability weight should be promoted from anecdote alone.
+## V0 limitations
 
-## V0 priors and limitations
+The current recovery/severity tables are broad deterministic v0 priors. They make the architecture executable and testable but are **not empirically certified for production recommendation authority**.
 
-The current recovery/severity tables are intentionally broad deterministic v0 priors. They make the architecture executable and testable but are **not yet empirically certified for production recommendation authority**.
+Current intentional limitations include no private medical records, no private GPS telemetry, no automatically admitted live provider, no exact anatomical grading from broadcast video, no medical-clearance prediction, no learned reporter/team reliability model yet, and no direct fantasy-point multiplier inside IRRIS.
 
-Current intentional limitations:
+## Fantasy translation boundary
 
-- no private club medical records or GPS telemetry;
-- no live provider automatically admitted by this code;
-- no autonomous diagnosis claim;
-- no exact anatomical grading from broadcast video;
-- no medical-clearance prediction;
-- no calibrated team/coach/reporter reliability model yet;
-- no direct fantasy-point multiplier inside IRRIS;
-- no recommendation authority until historical calibration gates are passed.
+IRRIS estimates physical state and availability. The scoring model should translate the four scenario states and functional vector into opportunity/efficiency distributions, then propagate them into median, ceiling, floor, bust probability, and teammate contingency upside.
 
-## Why fantasy-point translation is downstream
-
-IRRIS should estimate the physical/availability state. The scoring model should decide how those states change fantasy outcomes.
-
-A future TIBER-Forecast scoring integration should condition opportunity and efficiency distributions on the four IRRIS scenarios and functional vector, then propagate those mixtures into median, ceiling, floor, bust probability, and teammate contingency upside. This avoids hard-coding a generic “hamstring = -12%” rule.
+This deliberately avoids rules such as “hamstring = -12% projection.”
 
 ## API
 
-Protected compute endpoint:
+Protected endpoint:
 
 ```text
 POST /api/irris/assess
 ```
 
-The route uses the existing Forecast API-key gate. It accepts a typed IRRIS request and returns a versioned assessment.
+It uses the existing Forecast API-key gate and returns a versioned `irris-assessment-v0` payload.
 
 ## Promotion doctrine
 
-IRRIS v0 implementation status and recommendation authority are separate concepts.
+Code-complete experimental inference and production recommendation authority are different states.
 
-The subsystem may be code-complete as an experimental inference kernel while remaining **HOLD for production recommendation authority** until:
-
-- a governed live/historical evidence feed exists;
-- source use/licensing is approved;
-- empirical calibration gates are defined and passed;
-- temporal replay tests show no future leakage;
-- downstream TIBER-Fantasy preserves inference/fact separation;
-- calibration/reconciliation evidence is reviewable.
+Promotion requires a governed live/historical evidence feed, approved source use/licensing, empirical calibration gates, successful frozen-as-of replay tests, preserved fact/inference separation in TIBER-Fantasy, and reviewable reconciliation evidence.
