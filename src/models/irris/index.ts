@@ -11,3 +11,9 @@ export type {
 } from './irrisReconciliation.js';
 export { compareIrrisAssessments } from './irrisShock.js';
 export type { IrrisAssessmentShock, IrrisShockLevel } from './irrisShock.js';
+export {
+  getIrrisMedicalEvidenceAnchors,
+  IRRIS_MEDICAL_EVIDENCE_REGISTRY,
+  IRRIS_MEDICAL_EVIDENCE_REGISTRY_VERSION,
+} from './irrisMedicalEvidenceRegistry.js';
+export type { IrrisEvidenceTier, IrrisMedicalEvidenceAnchor } from './irrisMedicalEvidenceRegistry.js';
